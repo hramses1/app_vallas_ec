@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ubicar vallas</title>
+<link href="https://fonts.googleapis.com/css2?family=Overpass:wght@400;600;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 Overpass, 'Segoe UI', sans-serif; font-variant-numeric: tabular-nums; color: #1f2a27; background: #fff; }
+  main { display: grid; grid-template-columns: 360px 1fr; height: 100vh; }
+  aside { padding: 16px; overflow-y: auto; border-right: 1px solid #dde3df; }
+  #map { height: 100%; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 16px 0 4px; }
+  p { margin: 4px 0; }
+  .muted { color: #55625d; font-size: 13px; }
+  label { display: block; margin-top: 12px; font-weight: 600; font-size: 13px; }
+  input { width: 100%; padding: 8px; font: inherit; border: 1px solid #a9b5af; border-radius: 8px; margin-top: 4px; }
+  button { font: inherit; padding: 8px 12px; border-radius: 8px; border: 1px solid #a9b5af; background: #fff; cursor: pointer; }
+  button.primary { background: #0b6e4f; border-color: #0b6e4f; color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  a { color: #0b6e4f; }
+  #message { min-height: 22px; margin-top: 12px; font-size: 14px; }
+  #message.error { color: #b3261e; }
+  button { transition: background-color 150ms ease, transform 160ms cubic-bezier(0.23, 1, 0.32, 1); }
+  button:hover:not(:disabled):not(.primary) { background: #f2f5f3; }
+  button.primary:hover { background: #084f39; }
+  button:active:not(:disabled) { transform: scale(0.97); }
+  :focus-visible { outline: 3px solid #f5b700; outline-offset: 2px; }
+  @media (max-width: 760px) {
+    main { grid-template-columns: 1fr; grid-template-rows: auto 55vh; height: auto; }
+    aside { border-right: 0; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <aside>
+    <h1>Ubicar vallas</h1>
+    <p class="muted" id="progress">Cargando...</p>
+
+    <label for="token">Clave de administración</label>
+    <input id="token" type="password" autocomplete="off">
+
+    <section id="card" hidden>
+      <h2 id="provider"></h2>
+      <p id="address"></p>
+      <p class="muted" id="details"></p>
+      <div class="row">
+        <a id="link-mapillary" target="_blank" rel="noopener">Ver en Mapillary</a>
+        <a id="link-google" target="_blank" rel="noopener">Ver en Google Maps</a>
+      </div>
+
+      <label for="coords">Coordenadas (lat, lng)</label>
+      <input id="coords" placeholder="-2.15, -79.90" inputmode="text">
+      <p class="muted">Haz clic en el mapa, o pega las coordenadas o un enlace de Google Maps. El círculo marca un punto de la vía citada: la valla puede estar lejos de él.</p>
+
+      <div class="row">
+        <button class="primary" id="save" disabled>Guardar ubicación</button>
+        <button id="not-found">Ya no existe</button>
+        <button id="skip">Saltar</button>
+      </div>
+      <p id="message" role="status"></p>
+    </section>
+    <p id="done" hidden>No quedan vallas por ubicar.</p>
+  </aside>
+  <div id="map"></div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const map = L.map('map').setView([-2.16, -79.89], 12);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, attribution: '© colaboradores de OpenStreetMap',
+}).addTo(map);
+
+let queue = [];
+let current = null;
+let hint = null;
+let pin = null;
+
+function parseCoords(text) {
+  const match = text.match(/(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)/);
+  if (!match) return null;
+  const lat = Number(match[1]), lng = Number(match[2]);
+  return Math.abs(lat) <= 90 && Math.abs(lng) <= 180 ? { lat, lng } : null;
+}
+
+function showMessage(text, isError = false) {
+  $('message').textContent = text;
+  $('message').className = isError ? 'error' : '';
+}
+
+function placePin(lat, lng) {
+  if (pin) pin.remove();
+  pin = L.marker([lat, lng], { draggable: true }).addTo(map);
+  pin.on('dragend', () => {
+    const point = pin.getLatLng();
+    $('coords').value = `${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}`;
+  });
+  $('save').disabled = false;
+}
+
+function showNext() {
+  current = queue.shift();
+  if (hint) hint.remove();
+  if (pin) pin.remove();
+  hint = pin = null;
+  $('coords').value = '';
+  $('save').disabled = true;
+  $('card').hidden = !current;
+  $('done').hidden = !!current;
+  if (!current) return;
+
+  $('provider').textContent = current.provider_name;
+  $('address').textContent = current.address;
+  $('details').textContent = `${current.width_m} × ${current.height_m} m, $${current.price_usd} por ${current.price_unit === 'dia' ? 'día' : current.price_unit}`;
+  const search = encodeURIComponent(`${current.address}, Ecuador`);
+  $('link-google').href = `https://www.google.com/maps/search/?api=1&query=${search}`;
+  if (current.lat !== null) {
+    // El círculo es solo la zona aproximada: no se guarda como ubicación
+    hint = L.circle([current.lat, current.lng], { radius: 500, color: '#b26a00' }).addTo(map);
+    map.setView([current.lat, current.lng], 15);
+    $('link-mapillary').href = `https://www.mapillary.com/app/?lat=${current.lat}&lng=${current.lng}&z=16`;
+  } else {
+    $('link-mapillary').href = 'https://www.mapillary.com/app/?lat=-2.16&lng=-79.89&z=12';
+  }
+}
+
+async function send(path, method, body) {
+  const response = await fetch(path, {
+    method,
+    headers: { 'Content-Type': 'application/json', 'X-Admin-Token': $('token').value },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (response.status === 401) throw new Error('La clave de administración no es correcta.');
+  if (!response.ok) throw new Error(`No se pudo guardar (error ${response.status}). Vuelve a intentarlo.`);
+}
+
+async function act(path, method, body, doneText) {
+  try {
+    await send(path, method, body);
+    showNext();
+    showMessage(doneText);
+    updateProgress();
+  } catch (error) {
+    showMessage(error.message, true);
+  }
+}
+
+async function updateProgress() {
+  const response = await fetch('/api/coverage');
+  const sources = await response.json();
+  const exact = sources.reduce((sum, s) => sum + s.exact, 0);
+  $('progress').textContent = `${exact} con ubicación exacta. Quedan ${queue.length + (current ? 1 : 0)} en esta lista.`;
+}
+
+map.on('click', (event) => {
+  if (!current) return;
+  $('coords').value = `${event.latlng.lat.toFixed(6)}, ${event.latlng.lng.toFixed(6)}`;
+  placePin(event.latlng.lat, event.latlng.lng);
+});
+
+async function readMapsLink(url) {
+  showMessage('Leyendo el enlace...');
+  const response = await fetch('/api/maps-link', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+  if (!response.ok) {
+    showMessage('Ese enlace no trae el punto. En Google Maps mantén presionado sobre la valla y copia las coordenadas.', true);
+    return;
+  }
+  const { lat, lng } = await response.json();
+  $('coords').value = `${lat}, ${lng}`;
+  placePin(lat, lng);
+  map.setView([lat, lng], 17);
+  showMessage('Pin puesto donde indica el enlace. Revísalo y guarda.');
+}
+
+$('coords').addEventListener('input', () => {
+  if (/^https?:/i.test($('coords').value.trim())) {
+    $('save').disabled = true;
+    readMapsLink($('coords').value.trim()).catch(() => showMessage('No se pudo leer el enlace.', true));
+    return;
+  }
+  const point = parseCoords($('coords').value);
+  if (point) {
+    placePin(point.lat, point.lng);
+    map.setView([point.lat, point.lng], 17);
+  } else {
+    $('save').disabled = true;
+  }
+});
+
+$('save').addEventListener('click', () => {
+  const point = parseCoords($('coords').value);
+  if (point) act(`/api/billboards/${current.id}/location`, 'PUT', point, 'Ubicación guardada.');
+});
+$('not-found').addEventListener('click', () => {
+  act(`/api/billboards/${current.id}/not-found`, 'POST', null, 'Marcada como inexistente.');
+});
+$('skip').addEventListener('click', () => {
+  queue.push(current);
+  showNext();
+  showMessage('');
+});
+
+fetch('/api/billboards/to-locate')
+  .then((response) => response.json())
+  .then((rows) => { queue = rows; showNext(); updateProgress(); })
+  .catch(() => { $('progress').textContent = 'No se pudo cargar la lista. Revisa que la API esté activa.'; });
+</script>
+</body>
+</html>

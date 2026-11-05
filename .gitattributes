@@ -1,0 +1,4 @@
+# Finales de línea uniformes entre Windows y los contenedores Linux
+* text=auto eol=lf
+*.pdf binary
+*.png binary

@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Revisar reportes</title>
+<link href="https://fonts.googleapis.com/css2?family=Overpass:wght@400;600;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 Overpass, 'Segoe UI', sans-serif; font-variant-numeric: tabular-nums; color: #1f2a27; background: #fff; }
+  main { display: grid; grid-template-columns: 420px 1fr; height: 100vh; }
+  aside { padding: 16px; overflow-y: auto; border-right: 1px solid #dde3df; }
+  #map { height: 100%; }
+  h1 { font-size: 18px; margin: 0 0 8px; }
+  h2 { font-size: 15px; margin: 0 0 4px; overflow-wrap: anywhere; }
+  p { margin: 4px 0; overflow-wrap: anywhere; }
+  .muted { color: #55625d; font-size: 13px; }
+  label { display: block; font-weight: 600; font-size: 13px; }
+  input, select { width: 100%; padding: 8px; font: inherit; border: 1px solid #a9b5af; border-radius: 8px; margin: 4px 0 8px; background: #fff; }
+  button { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid #a9b5af; background: #fff; cursor: pointer; }
+  button.primary { background: #0b6e4f; border-color: #0b6e4f; color: #fff; }
+  ul { list-style: none; margin: 8px 0 0; padding: 0; }
+  li { padding: 12px 0; border-top: 1px solid #dde3df; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .edit { margin-top: 10px; padding: 12px; background: #f2f5f3; border-radius: 6px; }
+  #tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  #tabs button[aria-pressed='true'] { background: #1f2a27; border-color: #1f2a27; color: #fff; }
+  #message { min-height: 22px; font-size: 14px; }
+  #message.error { color: #b3261e; }
+  button { transition: background-color 150ms ease, transform 160ms cubic-bezier(0.23, 1, 0.32, 1); }
+  button:hover:not(:disabled):not(.primary) { background: #f2f5f3; }
+  button.primary:hover { background: #084f39; }
+  button:active:not(:disabled) { transform: scale(0.97); }
+  :focus-visible { outline: 3px solid #f5b700; outline-offset: 2px; }
+  @media (max-width: 760px) {
+    main { grid-template-columns: 1fr; grid-template-rows: auto 50vh; height: auto; }
+    aside { border-right: 0; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <aside>
+    <h1>Revisar reportes</h1>
+    <form id="login">
+      <label for="token">Clave de administración</label>
+      <input id="token" type="password" autocomplete="off">
+      <button class="primary">Ver reportes</button>
+    </form>
+    <div id="tabs" hidden>
+      <button type="button" id="tab-pending" aria-pressed="true"></button>
+      <button type="button" id="tab-published" aria-pressed="false"></button>
+      <button type="button" id="tab-removed" aria-pressed="false"></button>
+    </div>
+    <p id="message" role="status"></p>
+    <ul id="list"></ul>
+  </aside>
+  <div id="map"></div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const TYPES = { estatica: 'Estática', digital: 'Digital', puente: 'Puente peatonal', mupi: 'Mupi', movil: 'Móvil' };
+const map = L.map('map').setView([-2.16, -79.89], 12);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, attribution: '© colaboradores de OpenStreetMap',
+}).addTo(map);
+const pins = L.layerGroup().addTo(map);
+let tab = 'pending';
+
+function showMessage(text, isError = false) {
+  $('message').textContent = text;
+  $('message').className = isError ? 'error' : '';
+}
+
+async function call(path, method = 'GET', body = undefined) {
+  const response = await fetch(path, {
+    method,
+    headers: { 'X-Admin-Token': $('token').value, 'Content-Type': 'application/json' },
+    body: body && JSON.stringify(body),
+  });
+  if (response.status === 401) throw new Error('La clave de administración no es correcta.');
+  if (response.status === 422) throw new Error('Revisa los datos: hay un número o un texto que no es válido.');
+  if (!response.ok) throw new Error(`La acción falló (error ${response.status}). Vuelve a intentarlo.`);
+  return response.status === 204 ? null : response.json();
+}
+
+function paragraph(text, className) {
+  const element = document.createElement('p');
+  element.textContent = text;
+  if (className) element.className = className;
+  return element;
+}
+
+function field(form, labelText, name, value, type = 'text') {
+  const label = document.createElement('label');
+  label.textContent = labelText;
+  const input = document.createElement('input');
+  input.name = name;
+  input.type = type;
+  if (type === 'number') {
+    input.min = '0';
+    input.step = 'any';
+  }
+  input.value = value ?? '';
+  label.append(input);
+  form.append(label);
+  return label;
+}
+
+function selectField(labelText, name, options, value) {
+  const label = document.createElement('label');
+  label.textContent = labelText;
+  const select = document.createElement('select');
+  select.name = name;
+  for (const [optionValue, text] of Object.entries(options)) {
+    select.add(new Option(text, optionValue, false, optionValue === value));
+  }
+  label.append(select);
+  return label;
+}
+
+function buildEditForm(item, path, isPublished) {
+  const form = document.createElement('form');
+  form.className = 'edit';
+  field(form, isPublished ? 'Dirección' : 'Dirección (si la dejas vacía, se busca al publicar)', 'address', item.address);
+  field(form, 'Empresa', 'provider_name', item.provider_name === 'Empresa por identificar' ? '' : item.provider_name);
+  form.append(selectField('Tipo', 'type', TYPES, item.type));
+  field(form, 'Teléfono', 'contact_phone', item.contact_phone);
+
+  const price = document.createElement('div');
+  price.className = 'pair';
+  field(price, 'Precio en dólares', 'price_usd', item.price_usd, 'number');
+  price.append(selectField('Por', 'price_unit', { mes: 'mes', dia: 'día' }, item.price_unit || 'mes'));
+  form.append(price);
+
+  const size = document.createElement('div');
+  size.className = 'pair';
+  field(size, 'Ancho en metros', 'width_m', item.width_m, 'number');
+  field(size, 'Alto en metros', 'height_m', item.height_m, 'number');
+  form.append(size);
+  if (!isPublished) field(form, 'Comentario', 'comment', item.comment);
+
+  const actions = document.createElement('div');
+  actions.className = 'row';
+  const save = document.createElement('button');
+  save.className = 'primary';
+  save.textContent = 'Guardar cambios';
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.textContent = 'Cancelar';
+  cancel.addEventListener('click', () => form.remove());
+  actions.append(save, cancel);
+  form.append(actions);
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const values = Object.fromEntries(new FormData(form));
+    for (const key of ['price_usd', 'width_m', 'height_m']) {
+      values[key] = values[key] === '' ? null : Number(values[key]);
+    }
+    try {
+      await call(path, 'PUT', values);
+      await load();
+      showMessage('Cambios guardados.');
+    } catch (error) {
+      showMessage(error.message, true);
+    }
+  });
+  return form;
+}
+
+function summary(item) {
+  const parts = [
+    TYPES[item.type],
+    `Empresa: ${item.provider_name || 'sin indicar'}`,
+    `Teléfono: ${item.contact_phone || 'sin indicar'}`,
+    `Precio: ${item.price_usd === null ? 'sin indicar' : `$${item.price_usd} por ${item.price_unit === 'dia' ? 'día' : 'mes'}`}`,
+    `Medidas: ${item.width_m && item.height_m ? `${item.width_m} × ${item.height_m} m` : 'sin indicar'}`,
+  ];
+  return `${parts.join('. ')}.`;
+}
+
+async function act(path, doneText) {
+  try {
+    await call(path, 'POST');
+    await load();
+    showMessage(doneText);
+  } catch (error) {
+    showMessage(error.message, true);
+  }
+}
+
+function renderItem(item, isPublished) {
+  const row = document.createElement('li');
+  const title = document.createElement('h2');
+  title.textContent = item.address || 'Sin dirección: se buscará al publicar';
+  row.append(title, paragraph(summary(item)));
+  if (item.comment) row.append(paragraph(item.comment));
+  row.append(paragraph(
+    isPublished
+      ? `${item.lat}, ${item.lng}. Ubicación ${item.location_precision}.`
+      : `${item.lat}, ${item.lng}. Recibido el ${new Date(item.created_at).toLocaleString('es-EC')}.`,
+    'muted',
+  ));
+
+  const actions = document.createElement('div');
+  actions.className = 'row';
+  const button = (label, onClick, primary) => {
+    const element = document.createElement('button');
+    element.type = 'button';
+    element.textContent = label;
+    if (primary) element.className = 'primary';
+    element.addEventListener('click', onClick);
+    actions.append(element);
+  };
+  const path = isPublished ? `/api/billboards/${item.id}` : `/api/reports/${item.id}`;
+  button('Ver en el mapa', () => map.setView([item.lat, item.lng], 17));
+  if (tab === 'removed') {
+    button('Restaurar en el mapa', () => act(`/api/billboards/${item.id}/restore`, 'Valla restaurada en el mapa.'), true);
+    row.append(actions);
+    return row;
+  }
+  button('Editar', () => {
+    const open = row.querySelector('form');
+    if (open) open.remove();
+    else row.append(buildEditForm(item, path, isPublished));
+  });
+  if (isPublished) {
+    button('Quitar del mapa', () => act(`/api/billboards/${item.id}/remove`, 'Valla quitada del mapa. Puedes restaurarla en la pestaña Quitadas.'));
+  }
+  if (!isPublished) {
+    button('Aprobar y publicar', () => decide(item.id, 'approve', 'Reporte publicado en el mapa.'), true);
+    button('Rechazar', () => decide(item.id, 'reject', 'Reporte rechazado.'));
+  }
+  row.append(actions);
+  L.marker([item.lat, item.lng], { title: item.address || 'Reporte' }).addTo(pins);
+  return row;
+}
+
+async function load() {
+  const [pending, published, removed] = await Promise.all([
+    call('/api/reports'),
+    call('/api/reports/published'),
+    call('/api/reports/published?removed=true'),
+  ]);
+  $('tabs').hidden = false;
+  $('tab-pending').textContent = `Por revisar (${pending.length})`;
+  $('tab-published').textContent = `Publicadas (${published.length})`;
+  $('tab-removed').textContent = `Quitadas (${removed.length})`;
+  $('tab-pending').setAttribute('aria-pressed', String(tab === 'pending'));
+  $('tab-published').setAttribute('aria-pressed', String(tab === 'published'));
+  $('tab-removed').setAttribute('aria-pressed', String(tab === 'removed'));
+  const isPublished = tab !== 'pending';
+  const items = { pending, published, removed }[tab];
+  pins.clearLayers();
+  $('list').replaceChildren(...items.map((item) => renderItem(item, isPublished)));
+  return pending.length;
+}
+
+async function refresh(doneText) {
+  try {
+    const left = await load();
+    showMessage(doneText ?? (left ? `${left} por revisar.` : 'No hay reportes por revisar.'));
+  } catch (error) {
+    showMessage(error.message, true);
+  }
+}
+
+async function decide(id, action, doneText) {
+  try {
+    await call(`/api/reports/${id}/${action}`, 'POST');
+    const left = await load();
+    showMessage(`${doneText} Quedan ${left} por revisar.`);
+  } catch (error) {
+    showMessage(error.message, true);
+  }
+}
+
+$('login').addEventListener('submit', (event) => {
+  event.preventDefault();
+  refresh();
+});
+$('tab-pending').addEventListener('click', () => {
+  tab = 'pending';
+  refresh('');
+});
+$('tab-published').addEventListener('click', () => {
+  tab = 'published';
+  refresh('');
+});
+$('tab-removed').addEventListener('click', () => {
+  tab = 'removed';
+  refresh('');
+});
+</script>
+</body>
+</html>
