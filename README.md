@@ -89,6 +89,16 @@ python -m importers.cne_pdf ruta/Tarifario-Vallas.pdf ../data/cne_2023.csv
 python -m importers.locate_roads ../data/cne_2023.csv
 ```
 
+## Producción
+
+`docker-compose.prod.yml` sirve el frontend compilado con nginx en `127.0.0.1:8091`, sin exponer la base ni la API. Se publica con un túnel de Cloudflare hacia ese puerto.
+
+```bash
+docker compose -p vallas -f docker-compose.prod.yml up -d --build
+```
+
+Carga los datos con `run --rm api` y los mismos importadores de arriba, añadiendo `-p vallas -f docker-compose.prod.yml`.
+
 ## Reportes de los usuarios
 
 El botón del mapa permite reportar una valla que falta. Revisa los reportes en http://127.0.0.1:8000/reportes con el `ADMIN_TOKEN` de `.env`. Al aprobarlos, salen en el mapa como ubicación aproximada y pasan a la lista de `/ubicar` para confirmarlos.
