@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /ubicar
+Disallow: /reportes
+
+Sitemap: https://vallas.devzio.site/sitemap.xml
